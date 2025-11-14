@@ -31,7 +31,6 @@ from lerobot.datasets.utils import (
     DEFAULT_EPISODES_PATH,
     DEFAULT_VIDEO_FILE_SIZE_IN_MB,
     DEFAULT_VIDEO_PATH,
-    get_file_size_in_mb,
     get_parquet_file_size_in_mb,
     to_parquet_with_hf_images,
     update_chunk_file_indices,
@@ -39,7 +38,7 @@ from lerobot.datasets.utils import (
     write_stats,
     write_tasks,
 )
-from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
+from lerobot.datasets.video_utils import get_video_duration_in_s
 
 
 def validate_all_metadata(all_metadata: list[LeRobotDatasetMetadata]):
@@ -136,9 +135,23 @@ def update_meta_data(
         df["_orig_chunk"] = df[orig_chunk_col].copy()
         df["_orig_file"] = df[orig_file_col].copy()
 
-        # Update chunk and file indices to point to destination
-        df[orig_chunk_col] = video_idx["chunk"]
-        df[orig_file_col] = video_idx["file"]
+        # Update chunk and file indices to point to the correct destination shard
+        # based on the original source shard. Fall back to the latest shard if
+        # mapping is not available (backward compatibility).
+        src_to_dst = video_idx.get("src_to_dst", {})
+        if src_to_dst:
+            def _map_dst_chunk(row):
+                return src_to_dst.get((row["_orig_chunk"], row["_orig_file"]), (video_idx["chunk"], video_idx["file"]))[0]
+
+            def _map_dst_file(row):
+                return src_to_dst.get((row["_orig_chunk"], row["_orig_file"]), (video_idx["chunk"], video_idx["file"]))[1]
+
+            df[orig_chunk_col] = df.apply(_map_dst_chunk, axis=1)
+            df[orig_file_col] = df.apply(_map_dst_file, axis=1)
+        else:
+            assert False
+            df[orig_chunk_col] = video_idx["chunk"]
+            df[orig_file_col] = video_idx["file"]
 
         # Apply per-source-file timestamp offsets
         src_to_offset = video_idx.get("src_to_offset", {})
@@ -268,6 +281,8 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
         videos_idx[key]["episode_duration"] = 0
         # Track offset for each source (chunk, file) pair
         videos_idx[key]["src_to_offset"] = {}
+        # Track destination (chunk, file) for each source (chunk, file) pair
+        videos_idx[key]["src_to_dst"] = {}
 
     for key, video_idx in videos_idx.items():
         unique_chunk_file_pairs = {
@@ -282,7 +297,6 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
 
         chunk_idx = video_idx["chunk"]
         file_idx = video_idx["file"]
-        current_offset = video_idx["latest_duration"]
 
         for src_chunk_idx, src_file_idx in unique_chunk_file_pairs:
             src_path = src_meta.root / DEFAULT_VIDEO_PATH.format(
@@ -297,45 +311,27 @@ def aggregate_videos(src_meta, dst_meta, videos_idx, video_files_size_in_mb, chu
                 file_index=file_idx,
             )
 
-            src_duration = get_video_duration_in_s(src_path)
-
-            if not dst_path.exists():
-                # Store offset before incrementing
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
-                dst_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(str(src_path), str(dst_path))
-                videos_idx[key]["episode_duration"] += src_duration
-                current_offset += src_duration
-                continue
-
-            # Check file sizes before appending
-            src_size = get_file_size_in_mb(src_path)
-            dst_size = get_file_size_in_mb(dst_path)
-
-            if dst_size + src_size >= video_files_size_in_mb:
-                # Rotate to a new file, this source becomes start of new destination
-                # So its offset should be 0
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
+            # Always advance to a fresh destination shard if the current slot is already used
+            if dst_path.exists():
                 chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, chunk_size)
                 dst_path = dst_meta.root / DEFAULT_VIDEO_PATH.format(
                     video_key=key,
                     chunk_index=chunk_idx,
                     file_index=file_idx,
                 )
-                dst_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy(str(src_path), str(dst_path))
-                # Reset offset for next file
-                current_offset = src_duration
-            else:
-                # Append to existing video file - use current accumulated offset
-                videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = current_offset
-                concatenate_video_files(
-                    [dst_path, src_path],
-                    dst_path,
-                )
-                current_offset += src_duration
 
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(str(src_path), str(dst_path))
+
+            # Each source shard maps to its dedicated destination shard with zero offset.
+            videos_idx[key]["src_to_offset"][(src_chunk_idx, src_file_idx)] = 0
+            videos_idx[key]["src_to_dst"][(src_chunk_idx, src_file_idx)] = (chunk_idx, file_idx)
+
+            src_duration = get_video_duration_in_s(src_path)
             videos_idx[key]["episode_duration"] += src_duration
+
+            # Prepare next slot for subsequent source shards
+            chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, chunk_size)
 
         videos_idx[key]["chunk"] = chunk_idx
         videos_idx[key]["file"] = file_idx

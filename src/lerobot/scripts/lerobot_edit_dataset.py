@@ -103,6 +103,8 @@ class SplitConfig:
 class MergeConfig:
     type: str = "merge"
     repo_ids: list[str] | None = None
+    roots: list[str] | None = None
+    rootout: str | None = None
 
 
 @dataclass
@@ -118,6 +120,9 @@ class EditDatasetConfig:
     root: str | None = None
     new_repo_id: str | None = None
     push_to_hub: bool = False
+    roots: list[str] | None = None
+    rootout: str | None = None
+
 
 
 def get_output_path(repo_id: str, new_repo_id: str | None, root: Path | None) -> tuple[str, Path]:
@@ -199,16 +204,16 @@ def handle_merge(cfg: EditDatasetConfig) -> None:
     if not isinstance(cfg.operation, MergeConfig):
         raise ValueError("Operation config must be MergeConfig")
 
-    if not cfg.operation.repo_ids:
+    if not cfg.operation.roots:
         raise ValueError("repo_ids must be specified for merge operation")
 
-    if not cfg.repo_id:
+    if not cfg.rootout:
         raise ValueError("repo_id must be specified as the output repository for merged dataset")
 
     logging.info(f"Loading {len(cfg.operation.repo_ids)} datasets to merge")
-    datasets = [LeRobotDataset(repo_id, root=cfg.root) for repo_id in cfg.operation.repo_ids]
+    datasets = [LeRobotDataset(cfg.repo_id, root=root) for root in cfg.operation.roots]
 
-    output_dir = Path(cfg.root) / cfg.repo_id if cfg.root else HF_LEROBOT_HOME / cfg.repo_id
+    output_dir = Path(cfg.rootout) # / cfg.repo_id if cfg.root else HF_LEROBOT_HOME / cfg.repo_id
 
     logging.info(f"Merging datasets into {cfg.repo_id}")
     merged_dataset = merge_datasets(
