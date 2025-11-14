@@ -68,11 +68,12 @@ def resolve_delta_timestamps(
     return delta_timestamps
 
 
-def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
+def make_dataset(cfg: TrainPipelineConfig, use_val_dataset: bool = False) -> LeRobotDataset | MultiLeRobotDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
     Args:
         cfg (TrainPipelineConfig): A TrainPipelineConfig config which contains a DatasetConfig and a PreTrainedConfig.
+        use_val_dataset (bool): If True, use cfg.val_dataset instead of cfg.dataset.
 
     Raises:
         NotImplementedError: The MultiLeRobotDataset is currently deactivated.
@@ -80,33 +81,34 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
     Returns:
         LeRobotDataset | MultiLeRobotDataset
     """
+    ds_cfg = cfg.val_dataset if use_val_dataset else cfg.dataset
     image_transforms = (
-        ImageTransforms(cfg.dataset.image_transforms) if cfg.dataset.image_transforms.enable else None
+        ImageTransforms(ds_cfg.image_transforms) if ds_cfg.image_transforms.enable else None
     )
 
-    if isinstance(cfg.dataset.repo_id, str):
+    if isinstance(ds_cfg.repo_id, str):
         ds_meta = LeRobotDatasetMetadata(
-            cfg.dataset.repo_id, root=cfg.dataset.root, revision=cfg.dataset.revision
+            ds_cfg.repo_id, root=ds_cfg.root, revision=ds_cfg.revision
         )
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
-        if not cfg.dataset.streaming:
+        if not ds_cfg.streaming:
             dataset = LeRobotDataset(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
-                episodes=cfg.dataset.episodes,
+                ds_cfg.repo_id,
+                root=ds_cfg.root,
+                episodes=ds_cfg.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
-                revision=cfg.dataset.revision,
-                video_backend=cfg.dataset.video_backend,
+                revision=ds_cfg.revision,
+                video_backend=ds_cfg.video_backend,
             )
         else:
             dataset = StreamingLeRobotDataset(
-                cfg.dataset.repo_id,
-                root=cfg.dataset.root,
-                episodes=cfg.dataset.episodes,
+                ds_cfg.repo_id,
+                root=ds_cfg.root,
+                episodes=ds_cfg.episodes,
                 delta_timestamps=delta_timestamps,
                 image_transforms=image_transforms,
-                revision=cfg.dataset.revision,
+                revision=ds_cfg.revision,
                 max_num_shards=cfg.num_workers,
             )
     else:
@@ -123,7 +125,7 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             f"{pformat(dataset.repo_id_to_index, indent=2)}"
         )
 
-    if cfg.dataset.use_imagenet_stats:
+    if ds_cfg.use_imagenet_stats:
         for key in dataset.meta.camera_keys:
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)

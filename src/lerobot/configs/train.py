@@ -36,6 +36,8 @@ TRAIN_CONFIG_NAME = "train_config.json"
 @dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
+    val_dataset: DatasetConfig | None = None
+    val_dataset_roots: list[str] | None = None
     env: envs.EnvConfig | None = None
     policy: PreTrainedConfig | None = None
     # Set `dir` to where you would like to save all of the run outputs. If you run another training session
@@ -55,6 +57,7 @@ class TrainPipelineConfig(HubMixin):
     batch_size: int = 8
     steps: int = 100_000
     eval_freq: int = 20_000
+    val_freq: int = 0
     log_freq: int = 200
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
@@ -99,6 +102,12 @@ class TrainPipelineConfig(HubMixin):
             raise ValueError(
                 "Policy is not configured. Please specify a pretrained policy with `--policy.path`."
             )
+
+        if self.val_dataset_roots:
+            if self.val_dataset is None:
+                raise ValueError("val_dataset_roots requires val_dataset to be configured.")
+            if len(self.val_dataset_roots) > 4:
+                raise ValueError("val_dataset_roots supports at most 4 entries.")
 
         if not self.job_name:
             if self.env is None:
