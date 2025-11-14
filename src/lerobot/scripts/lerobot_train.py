@@ -142,6 +142,28 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     """
     cfg.validate()
 
+    def build_val_datasets() -> list[dict[str, Any]]:
+        if cfg.val_dataset is None:
+            return []
+
+        roots = cfg.val_dataset_roots if cfg.val_dataset_roots else [cfg.val_dataset.root]
+        if not roots:
+            roots = [cfg.val_dataset.root]
+
+        original_root = cfg.val_dataset.root
+        datasets: list[dict[str, Any]] = []
+        for idx, root in enumerate(roots):
+            cfg.val_dataset.root = root
+            datasets.append(
+                {
+                    "dataset": make_dataset(cfg, use_val_dataset=True),
+                    "label": f"val{idx + 1}",
+                    "root": root,
+                }
+            )
+        cfg.val_dataset.root = original_root
+        return datasets
+
     # Create Accelerator if not provided
     # It will automatically detect if running in distributed mode or single-process mode
     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
@@ -178,16 +200,22 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
+    val_datasets_info: list[dict[str, Any]] = []
+
     # Dataset loading synchronization: main process downloads first to avoid race conditions
     if is_main_process:
         logging.info("Creating dataset")
         dataset = make_dataset(cfg)
+        if cfg.val_dataset is not None:
+            logging.info("Creating validation dataset(s)")
+        val_datasets_info = build_val_datasets()
 
     accelerator.wait_for_everyone()
 
     # Now all other processes can safely load the dataset
     if not is_main_process:
         dataset = make_dataset(cfg)
+        val_datasets_info = build_val_datasets()
 
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
@@ -267,6 +295,13 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
         logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+        for val_info in val_datasets_info:
+            val_dataset = val_info["dataset"]
+            logging.info(
+                f"{val_info['label']} (root={val_info['root']}): "
+                f"num_frames={val_dataset.num_frames} ({format_big_number(val_dataset.num_frames)}), "
+                f"num_episodes={val_dataset.num_episodes}"
+            )
 
     # create dataloader for offline training
     if hasattr(cfg.policy, "drop_n_last_frames"):
@@ -292,12 +327,42 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         prefetch_factor=2 if cfg.num_workers > 0 else None,
     )
 
+    # create validation dataloaders if validation datasets are provided
+    if val_datasets_info:
+        for val_info in val_datasets_info:
+            val_dataset = val_info["dataset"]
+            if hasattr(cfg.policy, "drop_n_last_frames"):
+                val_sampler = EpisodeAwareSampler(
+                    val_dataset.meta.episodes["dataset_from_index"],
+                    val_dataset.meta.episodes["dataset_to_index"],
+                    drop_n_last_frames=cfg.policy.drop_n_last_frames,
+                    shuffle=False,
+                )
+            else:
+                val_sampler = None
+
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                num_workers=cfg.num_workers,
+                batch_size=cfg.batch_size,
+                shuffle=False,
+                sampler=val_sampler,
+                pin_memory=device.type == "cuda",
+                drop_last=False,
+                prefetch_factor=2 if cfg.num_workers > 0 else None,
+            )
+            val_info["dataloader"] = val_loader
+
     # Prepare everything with accelerator
     accelerator.wait_for_everyone()
     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         policy, optimizer, dataloader, lr_scheduler
     )
+    for val_info in val_datasets_info:
+        val_info["dataloader"] = accelerator.prepare(val_info["dataloader"])
+
     dl_iter = cycle(dataloader)
+    val_dl_iters = [cycle(val_info["dataloader"]) for val_info in val_datasets_info]
 
     policy.train()
 
@@ -346,6 +411,29 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
+        is_val_step = cfg.val_freq > 0 and step % cfg.val_freq == 0 and bool(val_dl_iters)
+
+        if is_val_step:
+            policy.eval()
+            for val_info, val_iter in zip(val_datasets_info, val_dl_iters):
+                with torch.no_grad(), accelerator.autocast():
+                    val_batch = next(val_iter)
+                    val_batch = preprocessor(val_batch)
+                    val_loss, val_output_dict = policy.forward(val_batch)
+
+                if is_main_process:
+                    label = val_info["label"]
+                    logging.info(
+                        f"Validation loss ({label}) at step {step}: {val_loss.item():.3f}"
+                    )
+                    if wandb_logger:
+                        val_log_dict = {f"val_loss/{label}": val_loss.item()}
+                        if val_output_dict:
+                            val_log_dict.update(
+                                {f"val_{label}_{k}": v for k, v in val_output_dict.items()}
+                            )
+                        wandb_logger.log_dict(val_log_dict, step)
+            policy.train()
 
         if is_log_step:
             logging.info(train_tracker)
