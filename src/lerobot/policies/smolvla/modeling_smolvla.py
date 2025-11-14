@@ -540,6 +540,7 @@ class VLAFlowMatching(nn.Module):
         embs = []
         pad_masks = []
         att_masks = []
+        num_img_tokens = 0
         for _img_idx, (
             img,
             img_mask,
@@ -558,6 +559,7 @@ class VLAFlowMatching(nn.Module):
                 att_masks += [0] * (image_start_mask.shape[-1])
                 embs.append(image_start_token)
                 pad_masks.append(image_start_mask)
+                num_img_tokens += image_start_mask.shape[-1]
 
             img_emb = self.vlm_with_expert.embed_image(img)
             img_emb = img_emb
@@ -571,6 +573,7 @@ class VLAFlowMatching(nn.Module):
 
             embs.append(img_emb)
             pad_masks.append(img_mask)
+            num_img_tokens += num_img_embs
 
             att_masks += [0] * (num_img_embs)
             if self.add_image_special_tokens:
@@ -587,6 +590,7 @@ class VLAFlowMatching(nn.Module):
                 embs.append(image_end_token)
                 pad_masks.append(image_end_mask)
                 att_masks += [0] * (image_end_mask.shape[1])
+                num_img_tokens += image_end_mask.shape[1]
         lang_emb = self.vlm_with_expert.embed_language_tokens(lang_tokens)
         # Normalize language embeddings
         lang_emb_dim = lang_emb.shape[-1]
@@ -622,6 +626,13 @@ class VLAFlowMatching(nn.Module):
             att_masks = pad_tensor(att_masks, self.prefix_length, pad_value=0)
 
         att_masks = att_masks.expand(bsize, -1)
+        
+        # Store boundaries for later use
+        self.prefix_boundaries = {
+            'images_end': num_img_tokens,
+            'lang_end': num_img_tokens + num_lang_embs,
+            'state_end': num_img_tokens + num_lang_embs + states_seq_len,
+        }
 
         return embs, pad_masks, att_masks
 
@@ -721,7 +732,7 @@ class VLAFlowMatching(nn.Module):
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
         # Compute image and language key value cache
-        _, past_key_values = self.vlm_with_expert.forward(
+        prefix_output_embeds, past_key_values = self.vlm_with_expert.forward(
             attention_mask=prefix_att_2d_masks,
             position_ids=prefix_position_ids,
             past_key_values=None,
@@ -729,6 +740,7 @@ class VLAFlowMatching(nn.Module):
             use_cache=self.config.use_cache,
             fill_kv_cache=True,
         )
+        self.prefix_output_embeds = prefix_output_embeds[0]
         dt = -1.0 / self.config.num_steps
         dt = torch.tensor(dt, dtype=torch.float32, device=device)
 
