@@ -118,7 +118,7 @@ def load_nested_dataset(pq_dir: Path, features: datasets.Features | None = None)
 
     # TODO(rcadene): set num_proc to accelerate conversion to pyarrow
     with SuppressProgressBars():
-        datasets = Dataset.from_parquet([str(path) for path in paths], features=features)
+        datasets = Dataset.from_parquet([str(path) for path in paths], features=features).flatten_indices()
     return datasets
 
 

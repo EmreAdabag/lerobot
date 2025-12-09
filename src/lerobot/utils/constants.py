@@ -26,6 +26,7 @@ OBS_IMAGES = OBS_IMAGE + "s"
 OBS_LANGUAGE = OBS_STR + ".language"
 OBS_LANGUAGE_TOKENS = OBS_LANGUAGE + ".tokens"
 OBS_LANGUAGE_ATTENTION_MASK = OBS_LANGUAGE + ".attention_mask"
+OBS_GRID_TOKEN_IDS = 'grid_token_ids'
 
 ACTION = "action"
 REWARD = "next.reward"

@@ -39,6 +39,7 @@ from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PR
 def make_smolvla_pre_post_processors(
     config: SmolVLAConfig,
     dataset_stats: dict[str, dict[str, torch.Tensor]] | None = None,
+    dataset_root_path: str | None = None,
 ) -> tuple[
     PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
     PolicyProcessorPipeline[PolicyAction, PolicyAction],
@@ -75,6 +76,7 @@ def make_smolvla_pre_post_processors(
             padding=config.pad_language_to,
             padding_side="right",
             max_length=config.tokenizer_max_length,
+            dataset_root_path=dataset_root_path,
         ),
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(

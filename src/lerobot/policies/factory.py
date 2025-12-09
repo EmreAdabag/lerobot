@@ -320,6 +320,7 @@ def make_pre_post_processors(
         processors = make_smolvla_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
+            dataset_root_path=kwargs.get("dataset_root_path"),
         )
 
     elif isinstance(policy_cfg, GrootConfig):

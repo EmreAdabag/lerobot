@@ -24,12 +24,14 @@ token IDs and attention masks, which are then added to the observation dictionar
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+import json
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 from lerobot.configs.types import FeatureType, PipelineFeatureType, PolicyFeature
-from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
+from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_GRID_TOKEN_IDS
 from lerobot.utils.import_utils import _transformers_available
 
 from .core import EnvTransition, TransitionKey
@@ -72,6 +74,7 @@ class TokenizerProcessorStep(ObservationProcessorStep):
     padding_side: str = "right"
     padding: str = "max_length"
     truncation: bool = True
+    dataset_root_path: str | None = None
 
     # Internal tokenizer instance (not part of the config)
     input_tokenizer: Any = field(default=None, init=False, repr=False)
@@ -105,6 +108,18 @@ class TokenizerProcessorStep(ObservationProcessorStep):
                 "Either 'tokenizer' or 'tokenizer_name' must be provided. "
                 "Pass a tokenizer object directly or a tokenizer name to auto-load."
             )
+        try:
+            if self.dataset_root_path is not None:
+                with open(os.path.join(self.dataset_root_path, "sprite_names.json"), "r") as f:
+                    sprite_names = json.load(f)
+                self.sprite_token_ids = self._tokenize_text(sprite_names)['input_ids'].flatten().to('cuda')
+                assert len(self.sprite_token_ids) == len(sprite_names), "All sprites must be one token"
+                self._sprite_token_ids_device = None
+            else:
+                self.sprite_token_ids = None
+        except Exception as e:
+            print(f"Error loading sprite token ids: {e}")
+            self.sprite_token_ids = None
 
     def get_task(self, transition: EnvTransition) -> list[str] | None:
         """
@@ -149,6 +164,15 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         if task is None:
             raise ValueError("Task cannot be None")
 
+        # get grid token ids
+        # device = self._detect_device(self.transition)
+        # if self._sprite_token_ids_device != device:
+        #     self.sprite_token_ids = self.sprite_token_ids.to(device)
+        #     self._sprite_token_ids_device = device
+        if self.sprite_token_ids is not None:
+            grid = self.transition[TransitionKey.COMPLEMENTARY_DATA]['grid']
+            grid_token_ids = self.sprite_token_ids[grid]
+
         # Tokenize the task (this will create CPU tensors)
         tokenized_prompt = self._tokenize_text(task)
 
@@ -168,6 +192,9 @@ class TokenizerProcessorStep(ObservationProcessorStep):
         # Add tokenized data to the observation
         new_observation[OBS_LANGUAGE_TOKENS] = tokenized_prompt["input_ids"]
         new_observation[OBS_LANGUAGE_ATTENTION_MASK] = tokenized_prompt["attention_mask"].to(dtype=torch.bool)
+
+        if self.sprite_token_ids is not None:
+            new_observation[OBS_GRID_TOKEN_IDS] = grid_token_ids
 
         return new_observation
 

@@ -1458,7 +1458,8 @@ class ObservationProcessorStep(ProcessorStep, ABC):
 
         observation = new_transition.get(TransitionKey.OBSERVATION)
         if observation is None or not isinstance(observation, dict):
-            raise ValueError("ObservationProcessorStep requires an observation in the transition.")
+            observation = {}
+            # raise ValueError("ObservationProcessorStep requires an observation in the transition.")
 
         processed_observation = self.observation(observation.copy())
         new_transition[TransitionKey.OBSERVATION] = processed_observation
