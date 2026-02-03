@@ -243,6 +243,10 @@ class LiberoEnv(gym.Env):
         images = {}
         for camera_name in self.camera_name:
             image = raw_obs[camera_name]
+            if camera_name in ("agentview_image"):
+                image = np.flip(image, axis=1)
+            elif camera_name in ("robot0_eye_in_hand_image"):
+                image = np.flip(image, axis=1)
             images[self.camera_name_mapping[camera_name]] = image
 
         eef_pos = raw_obs.get("robot0_eef_pos")
