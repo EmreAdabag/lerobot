@@ -486,12 +486,13 @@ def _copy_and_reindex_data(
     if src_dataset.meta.episodes is None:
         src_dataset.meta.episodes = load_episodes(src_dataset.meta.root)
 
+    episode_set = set(episode_mapping)
     file_to_episodes: dict[Path, set[int]] = {}
-    for old_idx in episode_mapping:
-        file_path = src_dataset.meta.get_data_file_path(old_idx)
-        if file_path not in file_to_episodes:
-            file_to_episodes[file_path] = set()
-        file_to_episodes[file_path].add(old_idx)
+    for src_path in sorted((src_dataset.root / DATA_DIR).glob("*/*.parquet")):
+        df = pd.read_parquet(src_path, columns=["episode_index"])
+        episodes_to_keep = set(df["episode_index"].unique()) & episode_set
+        if episodes_to_keep:
+            file_to_episodes[src_path.relative_to(src_dataset.root)] = episodes_to_keep
 
     global_index = 0
     episode_data_metadata: dict[int, dict] = {}
@@ -513,6 +514,7 @@ def _copy_and_reindex_data(
         if new_task_idx is not None:
             task_mapping[old_task_idx] = new_task_idx
 
+    file_counter = 0
     for src_path in tqdm(sorted(file_to_episodes.keys()), desc="Processing data files"):
         df = pd.read_parquet(src_dataset.root / src_path)
 
@@ -523,11 +525,6 @@ def _copy_and_reindex_data(
             df["episode_index"] = df["episode_index"].replace(episode_mapping)
             df["index"] = range(global_index, global_index + len(df))
             df["task_index"] = df["task_index"].replace(task_mapping)
-
-            first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
-            chunk_idx = src_ep["data/chunk_index"]
-            file_idx = src_ep["data/file_index"]
         else:
             mask = df["episode_index"].isin(list(episode_mapping.keys()))
             df = df[mask].copy().reset_index(drop=True)
@@ -539,11 +536,8 @@ def _copy_and_reindex_data(
             df["index"] = range(global_index, global_index + len(df))
             df["task_index"] = df["task_index"].replace(task_mapping)
 
-            first_ep_old_idx = min(episodes_to_keep)
-            src_ep = src_dataset.meta.episodes[first_ep_old_idx]
-            chunk_idx = src_ep["data/chunk_index"]
-            file_idx = src_ep["data/file_index"]
-
+        chunk_idx = file_counter // dst_meta.chunks_size
+        file_idx = file_counter % dst_meta.chunks_size
         dst_path = dst_meta.root / DEFAULT_DATA_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
         dst_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -560,6 +554,7 @@ def _copy_and_reindex_data(
             }
 
         global_index += len(df)
+        file_counter += 1
 
     return episode_data_metadata
 
