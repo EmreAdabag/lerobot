@@ -191,8 +191,13 @@ def main():
     parser.add_argument(
         "--episode-index",
         type=int,
-        required=True,
+        default=None,
         help="Episode to visualize.",
+    )
+    parser.add_argument(
+        "--all-episodes",
+        action="store_true",
+        help="Visualize all episodes sequentially.",
     )
     parser.add_argument(
         "--root",
@@ -276,11 +281,24 @@ def main():
     repo_id = kwargs.pop("repo_id")
     root = kwargs.pop("root")
     tolerance_s = kwargs.pop("tolerance_s")
+    episode_index = kwargs.pop("episode_index")
+    all_episodes = kwargs.pop("all_episodes")
+
+    assert (episode_index is None) == all_episodes, (
+        "Provide exactly one of `--episode-index` or `--all-episodes`."
+    )
 
     logging.info("Loading dataset")
-    dataset = LeRobotDataset(repo_id, episodes=[args.episode_index], root=root, tolerance_s=tolerance_s)
-
-    visualize_dataset(dataset, **vars(args))
+    if all_episodes:
+        dataset = LeRobotDataset(repo_id, root=root, tolerance_s=tolerance_s)
+        for episode_index in range(dataset.num_episodes):
+            episode_dataset = LeRobotDataset(
+                repo_id, episodes=[episode_index], root=root, tolerance_s=tolerance_s
+            )
+            visualize_dataset(episode_dataset, episode_index=episode_index, **kwargs)
+    else:
+        dataset = LeRobotDataset(repo_id, episodes=[episode_index], root=root, tolerance_s=tolerance_s)
+        visualize_dataset(dataset, episode_index=episode_index, **kwargs)
 
 
 if __name__ == "__main__":
