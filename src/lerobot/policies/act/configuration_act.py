@@ -175,3 +175,15 @@ class ACTConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
+
+
+@PreTrainedConfig.register_subclass("act_intrinsic")
+@dataclass
+class ACTIntrinsicConfig(ACTConfig):
+    """ACT config with intrinsic-dimension subspace fine-tuning."""
+
+    intrinsic_dim: int = 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        assert self.intrinsic_dim > 0
