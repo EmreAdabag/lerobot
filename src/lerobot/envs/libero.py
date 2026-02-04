@@ -222,6 +222,9 @@ class LiberoEnv(gym.Env):
         raw_obs = self._env.env._get_observations()
         image = self._format_raw_obs(raw_obs)["pixels"]["image"]
         image = image[::-1, ::-1]  # flip both H and W for visualization
+        image2 = self._format_raw_obs(raw_obs)["pixels"]["image2"]
+        image2 = image2[::-1, ::-1]  # flip both H and W for visualization
+        image = np.concatenate([image, image2], axis=1)
         return image
 
     def _make_envs_task(self, task_suite: Any, task_id: int = 0):
@@ -243,10 +246,6 @@ class LiberoEnv(gym.Env):
         images = {}
         for camera_name in self.camera_name:
             image = raw_obs[camera_name]
-            if camera_name in ("agentview_image"):
-                image = np.flip(image, axis=1)
-            elif camera_name in ("robot0_eye_in_hand_image"):
-                image = np.flip(image, axis=1)
             images[self.camera_name_mapping[camera_name]] = image
 
         eef_pos = raw_obs.get("robot0_eef_pos")
