@@ -27,11 +27,14 @@ def _fast_walsh_hadamard(x: Tensor) -> Tensor:
 
 
 class _FastFoodProjection(nn.Module):
-    def __init__(self, flat_weight_dim: int, device: torch.device, dtype: torch.dtype) -> None:
+    def __init__(
+        self, flat_weight_dim: int, intrinsic_dim: int, device: torch.device, dtype: torch.dtype
+    ) -> None:
         super().__init__()
         assert flat_weight_dim > 0
+        assert intrinsic_dim > 0
         self.flat_weight_dim = flat_weight_dim
-        self.size = 1 << int(math.ceil(math.log2(flat_weight_dim)))
+        self.size = 1 << int(math.ceil(math.log2(max(flat_weight_dim, intrinsic_dim))))
         self.register_buffer("G", torch.randn(self.size, device=device, dtype=dtype))
         self.register_buffer("Pi", torch.randperm(self.size, device=device))
         self.register_buffer("B", (torch.randint(0, 2, (self.size,), device=device) * 2 - 1).to(dtype))
@@ -58,7 +61,7 @@ class _SubspaceParametrization(nn.Module):
         flat_dim = int(np.prod(param_shape))
         object.__setattr__(self, "_theta", theta)
         self._param_shape = param_shape
-        self._proj = _FastFoodProjection(flat_dim, theta.device, theta.dtype)
+        self._proj = _FastFoodProjection(flat_dim, theta.size(0), theta.device, theta.dtype)
 
     def forward(self, weight: Tensor) -> Tensor:
         delta = self._proj(self._theta).view(self._param_shape)
