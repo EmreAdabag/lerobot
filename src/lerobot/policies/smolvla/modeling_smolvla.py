@@ -70,7 +70,9 @@ from lerobot.policies.utils import (
 )
 from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS, OBS_STATE
 from lerobot.utils.utils import get_safe_dtype
-
+import math
+import numpy as np
+from torch.nn.utils import parametrize
 
 class ActionSelectKwargs(TypedDict, total=False):
     inference_delay: int | None
@@ -244,7 +246,39 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self.config = config
         self.init_rtc_processor()
         self.model = VLAFlowMatching(config, rtc_processor=self.rtc_processor)
+        
+        # Apply intrinsic dimension subspace parametrization if specified
+        # But only if we're not loading from pretrained (defer until after weight loading)
+        if config.intrinsic_dim > 0 and not config.pretrained_path:
+            self._apply_intrinsic_dimension_subspace(config.intrinsic_dim)
+        
         self.reset()
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_name_or_path, **kwargs):
+        """Override to handle intrinsic dimension parametrization after loading weights."""
+        # Get the config to check if intrinsic_dim is set
+        config = kwargs.get('config')
+        if config is None:
+            config = cls.config_class.from_pretrained(pretrained_name_or_path)
+            kwargs['config'] = config
+        
+        intrinsic_dim = config.intrinsic_dim if hasattr(config, 'intrinsic_dim') else 0
+        
+        # Temporarily disable intrinsic_dim during loading
+        original_intrinsic_dim = config.intrinsic_dim if hasattr(config, 'intrinsic_dim') else 0
+        if hasattr(config, 'intrinsic_dim'):
+            config.intrinsic_dim = 0
+        
+        # Load the model normally
+        instance = super(SmolVLAPolicy, cls).from_pretrained(pretrained_name_or_path, **kwargs)
+        
+        # Now apply intrinsic dimension parametrization after weights are loaded
+        if original_intrinsic_dim > 0:
+            instance.config.intrinsic_dim = original_intrinsic_dim
+            instance._apply_intrinsic_dimension_subspace(original_intrinsic_dim)
+        
+        return instance
 
     def reset(self):
         """This should be called whenever the environment is reset."""
@@ -501,6 +535,84 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 "Training SmolVLA from scratch using PEFT. This is unlikely to yield good results. "
                 "Set `load_vlm_weights=True` to fine-tune the existing policy."
             )
+    
+    def _apply_intrinsic_dimension_subspace(self, intrinsic_dim: int) -> None:
+        """Apply intrinsic dimension subspace parametrization to all model parameters."""
+        
+        def _fast_walsh_hadamard(x: Tensor) -> Tensor:
+            assert x.dim() == 1
+            size = x.shape[0]
+            assert size == 2 ** int(round(math.log2(size)))
+            h = 1
+            result = x
+            while h < size:
+                result = result.view(-1, h * 2)
+                left = result[:, :h]
+                right = result[:, h : 2 * h]
+                result = torch.cat((left + right, left - right), dim=1)
+                h *= 2
+            return result.view(size)
+        
+        class _FastFoodProjection(nn.Module):
+            def __init__(
+                self, flat_weight_dim: int, intrinsic_dim: int, device: torch.device, dtype: torch.dtype
+            ) -> None:
+                super().__init__()
+                assert flat_weight_dim > 0
+                assert intrinsic_dim > 0
+                self.flat_weight_dim = flat_weight_dim
+                self.dtype = dtype
+                self.size = 1 << int(math.ceil(math.log2(max(flat_weight_dim, intrinsic_dim))))
+                self.register_buffer("G", torch.randn(self.size, device=device, dtype=dtype))
+                self.register_buffer("Pi", torch.randperm(self.size, device=device))
+                self.register_buffer("B", (torch.randint(0, 2, (self.size,), device=device) * 2 - 1).to(dtype))
+                divisor = torch.sqrt(self.size * torch.sum(torch.pow(self.G, 2)))
+                self.register_buffer("divisor", divisor)
+            
+            def forward(self, theta: Tensor) -> Tensor:
+                assert theta.dim() == 1
+                # Convert theta to target dtype for projection
+                theta_typed = theta.to(dtype=self.dtype)
+                theta_padded = F.pad(theta_typed, pad=(0, self.size - theta_typed.size(0)), value=0.0, mode="constant")
+                theta_padded = theta_padded * self.B
+                hbx = _fast_walsh_hadamard(theta_padded)
+                pihbx = hbx[self.Pi]
+                gpihbx = pihbx * self.G
+                hgpihbx = _fast_walsh_hadamard(gpihbx)
+                result = hgpihbx[: self.flat_weight_dim]
+                result = result / (self.divisor * math.sqrt(float(self.flat_weight_dim) / self.size))
+                return result
+        
+        class _SubspaceParametrization(nn.Module):
+            def __init__(self, theta: nn.Parameter, param_shape: tuple[int, ...], param_dtype: torch.dtype) -> None:
+                super().__init__()
+                assert theta.dim() == 1
+                flat_dim = int(np.prod(param_shape))
+                object.__setattr__(self, "_theta", theta)
+                self._param_shape = param_shape
+                self._param_dtype = param_dtype
+                self._proj = _FastFoodProjection(flat_dim, theta.size(0), theta.device, param_dtype)
+            
+            def forward(self, weight: Tensor) -> Tensor:
+                delta = self._proj(self._theta).view(self._param_shape)
+                return weight + delta
+        
+        params = [(name, param.shape, param.dtype) for name, param in self.model.named_parameters()]
+        assert params
+        first_param = next(self.model.parameters())
+        # Use float32 for theta - will be converted in projection
+        theta = nn.Parameter(torch.zeros(intrinsic_dim, device=first_param.device, dtype=torch.float32))
+        self.model.theta = theta
+        for full_name, param_shape, param_dtype in params:
+            module_name, param_name = full_name.rsplit(".", 1) if "." in full_name else ("", full_name)
+            module = self.model.get_submodule(module_name) if module_name else self.model
+            assert not parametrize.is_parametrized(module, param_name)
+            parametrize.register_parametrization(
+                module,
+                param_name,
+                _SubspaceParametrization(theta, param_shape, param_dtype),
+            )
+            module.parametrizations[param_name].original.requires_grad_(False)
 
 
 def pad_tensor(tensor, max_len, pad_value=0):

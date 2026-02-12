@@ -105,6 +105,9 @@ class SmolVLAConfig(PreTrainedConfig):
 
     # Real-Time Chunking (RTC) configuration
     rtc_config: RTCConfig | None = None
+    
+    # Intrinsic dimension for subspace training (0 = disabled)
+    intrinsic_dim: int = 0
 
     def __post_init__(self):
         super().__post_init__()
