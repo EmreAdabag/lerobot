@@ -764,6 +764,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
     def push_to_hub(
         self,
+        repo_id: str | None = None,
         branch: str | None = None,
         tags: list | None = None,
         license: str | None = "apache-2.0",
@@ -774,20 +775,21 @@ class LeRobotDataset(torch.utils.data.Dataset):
         upload_large_folder: bool = False,
         **card_kwargs,
     ) -> None:
+        target_repo_id = repo_id if repo_id is not None else self.repo_id
         ignore_patterns = ["images/"]
         if not push_videos:
             ignore_patterns.append("videos/")
 
         hub_api = HfApi()
         hub_api.create_repo(
-            repo_id=self.repo_id,
+            repo_id=target_repo_id,
             private=private,
             repo_type="dataset",
             exist_ok=True,
         )
         if branch:
             hub_api.create_branch(
-                repo_id=self.repo_id,
+                repo_id=target_repo_id,
                 branch=branch,
                 revision=self.revision,
                 repo_type="dataset",
@@ -795,7 +797,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             )
 
         upload_kwargs = {
-            "repo_id": self.repo_id,
+            "repo_id": target_repo_id,
             "folder_path": self.root,
             "repo_type": "dataset",
             "revision": branch,
@@ -810,12 +812,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         card = create_lerobot_dataset_card(
             tags=tags, dataset_info=self.meta.info, license=license, **card_kwargs
         )
-        card.push_to_hub(repo_id=self.repo_id, repo_type="dataset", revision=branch)
+        card.push_to_hub(repo_id=target_repo_id, repo_type="dataset", revision=branch)
 
         if tag_version:
             with contextlib.suppress(RevisionNotFoundError):
-                hub_api.delete_tag(self.repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
-            hub_api.create_tag(self.repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
+                hub_api.delete_tag(target_repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
+            hub_api.create_tag(target_repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
 
     def pull_from_repo(
         self,
