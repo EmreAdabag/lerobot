@@ -597,7 +597,7 @@ class SmolVLAPolicy(PreTrainedPolicy):
                 delta = self._proj(self._theta).view(self._param_shape)
                 return weight + delta
         
-        params = [(name, param.shape, param.dtype) for name, param in self.model.named_parameters()]
+        params = [(name, param.shape, param.dtype) for name, param in self.model.named_parameters() if param.requires_grad]
         assert params
         first_param = next(self.model.parameters())
         # Use float32 for theta - will be converted in projection
