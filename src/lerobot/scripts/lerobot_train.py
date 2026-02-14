@@ -459,10 +459,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             accelerator.wait_for_everyone()
 
         if cfg.env and is_eval_step:
+            accelerator.wait_for_everyone()
             if is_main_process:
                 step_id = get_step_identifier(step, cfg.steps)
                 logging.info(f"Eval policy at step {step}")
-                with torch.no_grad(), accelerator.autocast():
+                with torch.no_grad():
                     eval_info = eval_policy_all(
                         envs=eval_env,  # dict[suite][task_id] -> vec_env
                         policy=accelerator.unwrap_model(policy),
@@ -504,6 +505,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+            accelerator.wait_for_everyone()
 
     if eval_env:
         close_envs(eval_env)
