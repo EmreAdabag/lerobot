@@ -248,35 +248,92 @@ class SmolVLAPolicy(PreTrainedPolicy):
         self.model = VLAFlowMatching(config, rtc_processor=self.rtc_processor)
         
         # Apply intrinsic dimension subspace parametrization if specified
-        # But only if we're not loading from pretrained (defer until after weight loading)
-        if config.intrinsic_dim > 0 and not config.pretrained_path:
+        # Only apply during __init__ if:
+        # 1. intrinsic_dim > 0, AND
+        # 2. Either we're not loading from pretrained OR the checkpoint has subspace params
+        should_parametrize = config.intrinsic_dim > 0 and (
+            not hasattr(config, '_loading_from_subspace_checkpoint') or 
+            config._loading_from_subspace_checkpoint
+        )
+        if should_parametrize:
             self._apply_intrinsic_dimension_subspace(config.intrinsic_dim)
         
         self.reset()
     
     @classmethod
     def from_pretrained(cls, pretrained_name_or_path, **kwargs):
-        """Override to handle intrinsic dimension parametrization after loading weights."""
-        # Get the config to check if intrinsic_dim is set
+        """Override to handle intrinsic dimension parametrization for loading weights.
+        
+        This method handles three cases:
+        1. Loading a subspace checkpoint for eval/resuming: applies parametrization before loading
+        2. Loading a regular checkpoint to start subspace training: loads first, then parametrizes
+        3. Loading a regular checkpoint normally: no parametrization
+        """
+        from pathlib import Path
+        
+        # Get the config
         config = kwargs.get('config')
         if config is None:
             config = cls.config_class.from_pretrained(pretrained_name_or_path)
             kwargs['config'] = config
         
-        intrinsic_dim = config.intrinsic_dim if hasattr(config, 'intrinsic_dim') else 0
+        # Store the original intrinsic_dim setting from config (user intent)
+        user_intrinsic_dim = config.intrinsic_dim if hasattr(config, 'intrinsic_dim') else 0
         
-        # Temporarily disable intrinsic_dim during loading
-        original_intrinsic_dim = config.intrinsic_dim if hasattr(config, 'intrinsic_dim') else 0
-        if hasattr(config, 'intrinsic_dim'):
+        # Check if checkpoint has subspace parameters by looking for model.theta in state dict
+        checkpoint_path = Path(pretrained_name_or_path)
+        has_subspace_params = False
+        checkpoint_intrinsic_dim = 0
+        
+        if checkpoint_path.exists() and checkpoint_path.is_dir():
+            # Look for pytorch_model.bin or model.safetensors
+            model_file = checkpoint_path / "pytorch_model.bin"
+            if not model_file.exists():
+                model_file = checkpoint_path / "model.safetensors"
+            
+            if model_file.exists():
+                if model_file.suffix == ".bin":
+                    state_dict = torch.load(model_file, map_location="cpu")
+                    has_subspace_params = "model.theta" in state_dict
+                    if has_subspace_params:
+                        checkpoint_intrinsic_dim = state_dict["model.theta"].shape[0]
+                else:
+                    # For safetensors
+                    try:
+                        from safetensors.torch import load_file
+                        state_dict = load_file(model_file)
+                        has_subspace_params = "model.theta" in state_dict
+                        if has_subspace_params:
+                            checkpoint_intrinsic_dim = state_dict["model.theta"].shape[0]
+                    except ImportError:
+                        pass
+        
+        # If checkpoint has subspace params, set intrinsic_dim to match for proper loading
+        if has_subspace_params:
+            assert user_intrinsic_dim == 0 or user_intrinsic_dim == checkpoint_intrinsic_dim, \
+                f"Checkpoint has intrinsic_dim={checkpoint_intrinsic_dim} but config specifies intrinsic_dim={user_intrinsic_dim}"
+            config.intrinsic_dim = checkpoint_intrinsic_dim
+            config._loading_from_subspace_checkpoint = True
+        else:
+            # Checkpoint doesn't have subspace params
+            # Don't apply parametrization during init (will do it after loading if needed)
+            config._loading_from_subspace_checkpoint = False
             config.intrinsic_dim = 0
         
-        # Load the model normally
+        kwargs['config'] = config
+        
+        # Load the model
         instance = super(SmolVLAPolicy, cls).from_pretrained(pretrained_name_or_path, **kwargs)
         
-        # Now apply intrinsic dimension parametrization after weights are loaded
-        if original_intrinsic_dim > 0:
-            instance.config.intrinsic_dim = original_intrinsic_dim
-            instance._apply_intrinsic_dimension_subspace(original_intrinsic_dim)
+        # If user wanted subspace training but checkpoint didn't have it,
+        # apply parametrization now after loading the base weights
+        if not has_subspace_params and user_intrinsic_dim > 0:
+            instance.config.intrinsic_dim = user_intrinsic_dim
+            instance._apply_intrinsic_dimension_subspace(user_intrinsic_dim)
+        
+        # Clean up temporary flag
+        if hasattr(instance.config, '_loading_from_subspace_checkpoint'):
+            delattr(instance.config, '_loading_from_subspace_checkpoint')
         
         return instance
 
